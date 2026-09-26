@@ -202,7 +202,7 @@ You can inspect all available flags with `--help`:
 Usage: hevoicechanger [OPTIONS]
 
 Options:
-  -m, --model <MODEL>                  Path to initial ONNX voice model [default: models/female_voice_hq_new.onnx]
+  -m, --model <MODEL>                  Path to initial ONNX voice model [default: models/female_voice_hfg_new.onnx]
   -i, --input-device <INPUT_DEVICE>    Specific microphone device name to use (defaults to system default)
   -o, --output-device <OUTPUT_DEVICE>  Specific speaker/output device name to use (defaults to system default)
   -g, --gain <GAIN>                    Initial mic input gain multiplier [default: 1.0]
@@ -222,7 +222,7 @@ cargo run --release -- --list-devices
 ### 4. Running Headless (Background Daemon)
 For headless environments, game servers, or low-overhead background operation:
 ```bash
-cargo run --release -- --headless --model models/female_voice_hq_new.onnx --gain 1.2 --volume 1.0
+cargo run --release -- --headless --model models/female_voice_hfg_new.onnx --gain 1.2 --volume 1.0
 ```
 
 ---
@@ -263,16 +263,16 @@ If using native PipeWire, you can use visual patchbay tools like **qpwgraph** or
 All voice models are stored in the `./models/` folder. The application automatically discovers all `.onnx` files in this directory on startup or whenever you click **"Refresh Models"** in the GUI.
 
 ### Included Models:
-- `female_voice_hq_new.onnx`: High-fidelity, 200-epoch causal model trained via teacher-student distillation on a clean 16 kHz paired dataset.
-- `female_voice_old.onnx`: Baseline reference model.
-- `female_voice_hfg_old.onnx`: Baseline model with HiFi-GAN vocoder topology.
+- `female_voice_hfg_new.onnx`: High-fidelity, 200-epoch causal model trained via teacher-student distillation on a clean 16 kHz paired dataset with HiFi-GAN vocoder topology.
+- `female_voice_old_hq.onnx`: High-quality baseline reference model.
+- `female_voice_old.onnx`: Standard baseline reference model.
 
 ### The Model Lore and Training Saga
 
-The path to `female_voice_hq_new.onnx` came after extensive experimentation with low-latency neural audio architectures.
+The path to `female_voice_hfg_new.onnx` came after extensive experimentation with low-latency neural audio architectures.
 
 #### The Early Struggles (The "Old" Models)
-Initial testing relied on generic pre-trained weights (`female_voice_old.onnx` and `female_voice_hfg_old.onnx`). While they proved that the real-time Rust engine worked, the vocal fidelity left much to be desired. Early custom training runs suffered from sample-rate mismatches: microphone audio recorded at 24 kHz or 48 kHz was fed into training pipelines expecting 16 kHz, causing severe spectral smearing, robotic distortion, and phase artifacts. Extended 500-epoch runs took hours of compute only to yield muffled results.
+Initial testing relied on generic pre-trained weights (`female_voice_old.onnx` and `female_voice_old_hq.onnx`). While they proved that the real-time Rust engine worked, the vocal fidelity left much to be desired. Early custom training runs suffered from sample-rate mismatches: microphone audio recorded at 24 kHz or 48 kHz was fed into training pipelines expecting 16 kHz, causing severe spectral smearing, robotic distortion, and phase artifacts. Extended 500-epoch runs took hours of compute only to yield muffled results.
 
 #### The Breakthrough: Teacher-Student Knowledge Distillation
 To achieve crystalline real-time conversion with zero lookahead, a hybrid distillation pipeline was engineered:
@@ -342,9 +342,9 @@ hevoicechanger/
 ├── README.md                # Comprehensive documentation
 ├── make_deploy.sh           # Standalone packaging script
 ├── models/                  # ONNX AI voice models folder
-│   ├── female_voice_hq_new.onnx
-│   ├── female_voice_old.onnx
-│   └── female_voice_hfg_old.onnx
+│   ├── female_voice_hfg_new.onnx
+│   ├── female_voice_old_hq.onnx
+│   └── female_voice_old.onnx
 └── src/
     ├── lib.rs               # Library root (audio, engine, ui modules)
     ├── main.rs              # CLI parser, worker orchestration, runtime setup

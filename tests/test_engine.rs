@@ -1,12 +1,12 @@
 use std::path::Path;
-use hevoicechanger::engine::{VoiceChangerEngine, DEFAULT_CHUNK_SIZE, DEFAULT_HISTORY_SIZE, SAMPLE_RATE};
+use hevoicechanger::engine::{VoiceChangerEngine, DEFAULT_CHUNK_SIZE, DEFAULT_HISTORY_SIZE, SAMPLE_RATE, ExecutionBackend};
 
 #[test]
 fn test_engine_inference_and_rtf() {
-    let model_path = Path::new("models/female_voice.onnx");
-    assert!(model_path.exists(), "Model file models/female_voice.onnx must exist");
+    let model_path = Path::new("models/female_voice_hfg_new.onnx");
+    assert!(model_path.exists(), "Model file models/female_voice_hfg_new.onnx must exist");
 
-    let mut engine = VoiceChangerEngine::new(model_path, DEFAULT_HISTORY_SIZE, DEFAULT_CHUNK_SIZE)
+    let mut engine = VoiceChangerEngine::new(model_path, DEFAULT_HISTORY_SIZE, DEFAULT_CHUNK_SIZE, 4, ExecutionBackend::Cpu, 0.0)
         .expect("Failed to initialize engine");
 
     // Generate 1 second of synthetic 440Hz sine wave at 16kHz
@@ -43,13 +43,13 @@ fn test_engine_inference_and_rtf() {
     println!("Output RMS: {:.4}", rms);
     assert!(rms > 0.001, "Output audio should have non-zero signal");
 
-    // Test model hot-swapping to female_voice_hfg.onnx
-    let hfg_path = Path::new("models/female_voice_hfg.onnx");
-    if hfg_path.exists() {
-        engine.swap_model(hfg_path).expect("Failed to swap model to HFG");
+    // Test model hot-swapping to female_voice_old.onnx
+    let old_path = Path::new("models/female_voice_old.onnx");
+    if old_path.exists() {
+        engine.swap_model(old_path).expect("Failed to swap model");
         let sample_chunk = vec![0.1; DEFAULT_CHUNK_SIZE];
         let converted = engine.process_chunk(&sample_chunk).expect("Failed to process chunk after swap");
         assert_eq!(converted.len(), DEFAULT_CHUNK_SIZE);
-        println!("Successfully verified model hot-swapping to HFG variant!");
+        println!("Successfully verified model hot-swapping!");
     }
 }

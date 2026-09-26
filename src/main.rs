@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -17,7 +17,7 @@ use hevoicechanger::ui::VoiceChangerApp;
 #[command(author, version, about = "Ultra-low latency Linux AI Voice Changer (Direct Mic to Speaker)")]
 struct Args {
     /// Path to initial ONNX voice model
-    #[arg(short, long, default_value = "models/female_voice_hq_new.onnx")]
+    #[arg(short, long, default_value = "models/female_voice_hfg_new.onnx")]
     model: PathBuf,
 
     /// Specific microphone device name to use (defaults to system default)

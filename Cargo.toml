@@ -2,6 +2,9 @@
 name = "hevoicechanger"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Ultra-low latency Linux AI Voice Changer (Direct Mic to Speaker)"
+repository = "https://github.com/ultrapg/hevoicechanger"
 
 [dependencies]
 ort = { version = "2.0.0-rc.9", features = ["webgpu"] }

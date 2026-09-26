@@ -67,7 +67,7 @@ impl VoiceChangerEngine {
             history_size,
             chunk_size,
             num_cores,
-            pitch_semitones: 0.0,
+            pitch_semitones,
             pitch_shifter,
             backend,
             last_inference_time_ms: 0.0,
