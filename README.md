@@ -18,7 +18,7 @@
 [Prerequisites](#prerequisites) •
 [Installation](#installation--building) •
 [Usage](#usage) •
-[Virtual Microphone Setup](#virtual-microphone-setup) •
+[Virtual Microphone](#virtual-microphone) •
 [Voice Models](#voice-models) •
 [Performance Tuning](#performance-tuning) •
 [License](#license)
@@ -35,6 +35,7 @@ Unlike traditional voice changers that introduce hundreds of milliseconds of buf
 - Causal convolutional architectures that process audio incrementally without future context.
 - Lock-free single-producer single-consumer ring buffers for glitch-free audio transfer.
 - Native multithreaded ONNX Runtime (`ort`) inference with Level 3 graph optimizations.
+- Built-in Virtual Microphone Bridge (`HEVoiceMic`) for instant Discord, OBS, Zoom, and in-game voice routing.
 - A lightweight, responsive dark-mode GUI built with `egui`/`eframe`, alongside a headless CLI daemon mode.
 
 ---
@@ -42,6 +43,10 @@ Unlike traditional voice changers that introduce hundreds of milliseconds of buf
 ## Key Features
 
 - **Ultra-Low Latency Inference**: Real-time sliding receptive field history buffer (16 kHz, streaming causal inference) with typical response times under 20-50 ms depending on hardware.
+- **Built-in Virtual Microphone (`HEVoiceMic`)**: Automatically creates an isolated virtual sink (`HEVoiceSink`) and virtual recording microphone (`HEVoiceMic`) via PipeWire or PulseAudio. Direct Discord, OBS, Zoom, and game integration with zero manual terminal setup.
+- **Headphone Monitoring ("Hear Myself")**: Real-time headphone monitoring toggleable directly via the GUI checkbox or `--monitor` CLI flag. Disabled by default to eliminate distracting self-echo.
+- **Fail-Safe Process Lifecycle**: Linux kernel `PR_SET_PDEATHSIG`, POSIX signal handling, and RAII cleanup ensure virtual devices are torn down cleanly upon exit without leaving ghost nodes.
+- **Live Connection Telemetry**: Real-time display of active listener count indicating how many voice applications (e.g. Discord, OBS) are currently connected to the virtual microphone.
 - **Accelerated Execution Backends**:
   - **CPU**: Multi-core SIMD vectorization (AVX2 / FMA) with customizable thread affinity.
   - **WebGPU (Vulkan)**: Hardware-accelerated GPU inference support.
@@ -59,58 +64,78 @@ Unlike traditional voice changers that introduce hundreds of milliseconds of buf
 ## Architecture
 
 ```text
-╔═════════════════════════════════════════════════════════════════════════════════╗
-║                                AUDIO PIPELINE                                   ║
-╠═════════════════════════════════════════════════════════════════════════════════╣
-║                                                                                 ║
-║   ┌───────────────────────────────────────────┐                                 ║
-║   │             Microphone (CPAL)             │                                 ║
-║   └─────────────────────┬─────────────────────┘                                 ║
-║                         │                                                       ║
-║                         ▼                                                       ║
-║   ┌───────────────────────────────────────────┐                                 ║
-║   │         Linear Resampler (16 kHz)         │                                 ║
-║   └─────────────────────┬─────────────────────┘                                 ║
-║                         │                                                       ║
-║                         ▼                                                       ║
-║   ┌───────────────────────────────────────────┐                                 ║
-║   │        Input Noise Gate & RMS Meter       │                                 ║
-║   └─────────────────────┬─────────────────────┘                                 ║
-║                         │                                                       ║
-║                         ▼                                                       ║
-║   ┌───────────────────────────────────────────┐                                 ║
-║   │  Lock-Free In-RingBuffer (65,536 samples) │                                 ║
-║   └─────────────────────┬─────────────────────┘                                 ║
-║                         │                                                       ║
-║                         ▼                                                       ║
-║   ┌───────────────────────────────────────────────────────────┐                 ║
-║   │                AI INFERENCE WORKER THREAD                 │                 ║
-║   │                                                           │                 ║
-║   │         [ Sliding Receptive History Context ]             │                 ║
-║   │                           │                               │                 ║
-║   │                           ▼                               │                 ║
-║   │         [ ONNX Runtime Session (Level 3 Opt) ]            │                 ║
-║   │                           │                               │                 ║
-║   │                           ▼                               │                 ║
-║   │         [ Pitch Shifter (-12 .. +12 Semitones) ]          │                 ║
-║   └─────────────────────┬─────────────────────────────────────┘                 ║
-║                         │                                                       ║
-║                         ▼                                                       ║
-║   ┌───────────────────────────────────────────┐                                 ║
-║   │ Lock-Free Out-RingBuffer (65,536 samples) │                                 ║
-║   └─────────────────────┬─────────────────────┘                                 ║
-║                         │                                                       ║
-║                         ▼                                                       ║
-║   ┌───────────────────────────────────────────┐                                 ║
-║   │       Output Noise Gate & RMS Meter       │                                 ║
-║   └─────────────────────┬─────────────────────┘                                 ║
-║                         │                                                       ║
-║                         ▼                                                       ║
-║   ┌───────────────────────────────────────────┐                                 ║
-║   │    Speakers / Audio Output Device (CPAL)  │                                 ║
-║   └───────────────────────────────────────────┘                                 ║
-║                                                                                 ║
-╚═════════════════════════════════════════════════════════════════════════════════╝
++-----------------------------------------------------------------------------------+
+|                                AUDIO PIPELINE                                     |
++-----------------------------------------------------------------------------------+
+|                                                                                   |
+|   +-------------------------------------------+                                   |
+|   |             Microphone (CPAL)             |                                   |
+|   +---------------------+---------------------+                                   |
+|                         |                                                         |
+|                         v                                                         |
+|   +-------------------------------------------+                                   |
+|   |         Linear Resampler (16 kHz)         |                                   |
+|   +---------------------+---------------------+                                   |
+|                         |                                                         |
+|                         v                                                         |
+|   +-------------------------------------------+                                   |
+|   |        Input Noise Gate & RMS Meter       |                                   |
+|   +---------------------+---------------------+                                   |
+|                         |                                                         |
+|                         v                                                         |
+|   +-------------------------------------------+                                   |
+|   |  Lock-Free In-RingBuffer (65,536 samples) |                                   |
+|   +---------------------+---------------------+                                   |
+|                         |                                                         |
+|                         v                                                         |
+|   +-----------------------------------------------------------+                   |
+|   |                AI INFERENCE WORKER THREAD                 |                   |
+|   |                                                           |                   |
+|   |         [ Sliding Receptive History Context ]             |                   |
+|   |                           |                               |                   |
+|   |                           v                               |                   |
+|   |         [ ONNX Runtime Session (Level 3 Opt) ]            |                   |
+|   |                           |                               |                   |
+|   |                           v                               |                   |
+|   |         [ Pitch Shifter (-12 .. +12 Semitones) ]          |                   |
+|   +---------------------+-------------------------------------+                   |
+|                         |                                                         |
+|                         v                                                         |
+|   +-------------------------------------------+                                   |
+|   | Lock-Free Out-RingBuffer (65,536 samples) |                                   |
+|   +---------------------+---------------------+                                   |
+|                         |                                                         |
+|                         v                                                         |
+|   +-------------------------------------------+                                   |
+|   |       Output Noise Gate & RMS Meter       |                                   |
+|   +---------------------+---------------------+                                   |
+|                         |                                                         |
+|                         v                                                         |
+|   +-------------------------------------------+                                   |
+|   |        Audio Playback Engine (CPAL)       |                                   |
+|   +---------------------+---------------------+                                   |
+|                         |                                                         |
+|         +---------------+---------------+                                         |
+|         |                               | (Optional Monitor: "Hear Myself")       |
+|         v                               v                                         |
+|   +---------------------------+   +---------------------------+                   |
+|   |   Virtual Speaker Sink    |   |    Physical Headphones    |                   |
+|   |      (HEVoiceSink)        |   |    (Zero Feedback Lag)    |                   |
+|   +-------------+-------------+   +---------------------------+                   |
+|                 |                                                                 |
+|                 v (Lossless Bridge)                                               |
+|   +---------------------------+                                                   |
+|   |   Virtual Microphone      |                                                   |
+|   |      (HEVoiceMic)         |                                                   |
+|   +-------------+-------------+                                                   |
+|                 |                                                                 |
+|                 v                                                                 |
+|   +---------------------------+                                                   |
+|   | Discord / OBS / Zoom /    |                                                   |
+|   | Steam / In-Game Voice     |                                                   |
+|   +---------------------------+                                                   |
+|                                                                                   |
++-----------------------------------------------------------------------------------+
 ```
 
 ---
@@ -122,17 +147,17 @@ HEVoicechanger requires a Linux distribution with standard audio and development
 ### Ubuntu / Debian / Pop!_OS / Linux Mint
 ```bash
 sudo apt update
-sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev
+sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev pipewire-bin
 ```
 
 ### Arch Linux / Manjaro
 ```bash
-sudo pacman -S --needed base-devel alsa-lib openssl pkgconf
+sudo pacman -S --needed base-devel alsa-lib openssl pkgconf pipewire pipewire-pulse
 ```
 
 ### Fedora / RHEL
 ```bash
-sudo dnf install -y gcc gcc-c++ alsa-lib-devel openssl-devel pkgconf-pkg-config
+sudo dnf install -y gcc gcc-c++ alsa-lib-devel openssl-devel pkgconf-pkg-config pipewire pipewire-pulseaudio
 ```
 
 ### Rust Toolchain
@@ -202,15 +227,20 @@ You can inspect all available flags with `--help`:
 Usage: hevoicechanger [OPTIONS]
 
 Options:
-  -m, --model <MODEL>                  Path to initial ONNX voice model [default: models/female_voice_hfg_new.onnx]
-  -i, --input-device <INPUT_DEVICE>    Specific microphone device name to use (defaults to system default)
-  -o, --output-device <OUTPUT_DEVICE>  Specific speaker/output device name to use (defaults to system default)
-  -g, --gain <GAIN>                    Initial mic input gain multiplier [default: 1.0]
-  -v, --volume <VOLUME>                Initial voice output volume multiplier [default: 1.0]
-      --headless                       Run in headless daemon mode (no GUI window)
-      --list-devices                   List available audio devices and exit
-  -h, --help                           Print help
-  -V, --version                        Print version
+  -m, --model <MODEL>                          Path to initial ONNX voice model [default: models/female_voice_hfg_new.onnx]
+  -i, --input-device <INPUT_DEVICE>            Specific microphone device name to use (defaults to system default)
+  -o, --output-device <OUTPUT_DEVICE>          Specific speaker/output device name to use (defaults to system default)
+  -g, --gain <GAIN>                            Initial mic input gain multiplier [default: 1.0]
+  -v, --volume <VOLUME>                        Initial voice output volume multiplier [default: 1.0]
+      --no-virtual-mic                         Do not create a virtual microphone; output directly to physical speakers
+      --monitor                                Hear yourself in headphones (headphone monitoring)
+      --virtual-mic-name <NAME>                Virtual microphone name [default: HEVoiceMic]
+      --virtual-sink-name <NAME>               Virtual speaker sink name [default: HEVoiceSink]
+      --clean-virtual-mic                      Clean up any lingering virtual audio devices and exit
+      --headless                               Run in headless daemon mode (no GUI window)
+      --list-devices                           List available audio devices and exit
+  -h, --help                                   Print help
+  -V, --version                                Print version
 ```
 
 ### 3. Listing Available Audio Devices
@@ -227,34 +257,43 @@ cargo run --release -- --headless --model models/female_voice_hfg_new.onnx --gai
 
 ---
 
-## Virtual Microphone Setup
+## Virtual Microphone
 
-To route your transformed voice into external applications such as **Discord**, **OBS Studio**, **Zoom**, or games, create a virtual audio loopback sink in **PipeWire** or **PulseAudio**.
+HEVoicechanger automatically provisions and routes an isolated virtual audio device pair upon launch:
 
-### Method A: Quick Command Line (PulseAudio / PipeWire-Pulse)
-Run these commands in your terminal to create a virtual microphone:
-```bash
-# 1. Create a null sink (an audio destination)
-pactl load-module module-null-sink sink_name=VoiceChangerSink sink_properties=device.description="VoiceChangerSink"
+1. **HEVoiceSink** (Virtual Speaker Sink): Receives the converted audio stream from the inference engine.
+2. **HEVoiceMic** (Virtual Microphone Source): Losslessly mirrors `HEVoiceSink` as a system input recording device.
 
-# 2. Remap the monitor of that sink into a virtual recording microphone
-pactl load-module module-remap-source master=VoiceChangerSink.monitor source_name=VirtualMic source_properties=device.description="Virtual_AI_Microphone"
+### Using in Discord, OBS Studio, and Games
+
+1. Start **HEVoicechanger**.
+2. Open your voice application (e.g. Discord, OBS Studio, Zoom, Steam).
+3. In **Settings -> Voice & Video -> Input Device**, choose **HEVoiceMic**.
+4. Speak normally into your physical microphone. Your transformed AI voice is delivered directly to Discord.
+
+### Headphone Monitoring ("Hear Myself")
+
+By default, headphone monitoring is **disabled** so you don't hear your own voice delayed while chatting with teammates.
+- To hear yourself, simply tick the **"Hear Myself (Headphone Monitor)"** checkbox in the GUI.
+- In headless mode, pass the `--monitor` flag:
+  ```bash
+  cargo run --release -- --headless --monitor
+  ```
+
+### Active Listener Telemetry
+
+The GUI and headless CLI display real-time connection counters showing how many applications are actively reading from `HEVoiceMic`. For example:
+```text
+Virtual Microphone: ACTIVE (HEVoiceMic)
+Connected to 1 voice app(s) (Discord/OBS/Zoom)
 ```
 
-Once created:
-1. In **HEVoicechanger**, select `VoiceChangerSink` as your **Speaker / Output Device**.
-2. In **Discord / OBS / Settings**, select `Virtual_AI_Microphone` as your **Input Device (Microphone)**.
+### Device Cleanup
 
-To unload the virtual sink when done:
+HEVoicechanger automatically unloads and destroys the virtual devices when you close the window or send `Ctrl+C`. If you ever terminate unexpectedly, you can clean up any leftover devices with:
 ```bash
-pactl unload-module module-remap-source
-pactl unload-module module-null-sink
+cargo run --release -- --clean-virtual-mic
 ```
-
-### Method B: Graphical Patchbay (PipeWire)
-If using native PipeWire, you can use visual patchbay tools like **qpwgraph** or **Helvum**:
-1. Connect `hevoicechanger` output ports to `Discord` / `OBS` input ports.
-2. Monitor yourself by linking `hevoicechanger` to your headphones simultaneously.
 
 ---
 
@@ -346,11 +385,12 @@ hevoicechanger/
 │   ├── female_voice_old_hq.onnx
 │   └── female_voice_old.onnx
 └── src/
-    ├── lib.rs               # Library root (audio, engine, ui modules)
+    ├── lib.rs               # Library root (audio, engine, ui, virtual_mic modules)
     ├── main.rs              # CLI parser, worker orchestration, runtime setup
     ├── engine.rs            # ONNX Runtime session, causal history, inference
     ├── audio.rs             # CPAL stream management, lock-free ring buffers, noise gates
-    └── ui.rs                # egui / eframe GUI, RMS meters, interactive controls
+    ├── ui.rs                # egui / eframe GUI, RMS meters, interactive controls
+    └── virtual_mic.rs       # PipeWire & PulseAudio virtual mic bridge & routing
 ```
 
 ---
