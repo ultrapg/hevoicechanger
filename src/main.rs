@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use anyhow::Result;
@@ -12,9 +12,10 @@ use rtrb::RingBuffer;
 use hevoicechanger::audio::{AudioControls, AudioSystem};
 use hevoicechanger::engine::{VoiceChangerEngine, DEFAULT_CHUNK_SIZE, DEFAULT_HISTORY_SIZE, WorkerCommand, ExecutionBackend};
 use hevoicechanger::ui::VoiceChangerApp;
+use hevoicechanger::virtual_mic::{VirtualMicBridge, VirtualMicConfig};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Ultra-low latency Linux AI Voice Changer (Direct Mic to Speaker)")]
+#[command(author, version, about = "Ultra-low latency Linux AI Voice Changer (Direct Mic to Speaker / Virtual Mic)")]
 struct Args {
     /// Path to initial ONNX voice model
     #[arg(short, long, default_value = "models/female_voice_hfg_new.onnx")]
@@ -36,6 +37,26 @@ struct Args {
     #[arg(short, long, default_value_t = 1.0)]
     volume: f32,
 
+    /// Do not create a virtual microphone; output directly to physical speakers
+    #[arg(long)]
+    no_virtual_mic: bool,
+
+    /// Hear yourself in headphones (headphone monitoring)
+    #[arg(long)]
+    monitor: bool,
+
+    /// Virtual microphone name (as seen in Discord/OBS)
+    #[arg(long, default_value = "HEVoiceMic")]
+    virtual_mic_name: String,
+
+    /// Virtual speaker sink name
+    #[arg(long, default_value = "HEVoiceSink")]
+    virtual_sink_name: String,
+
+    /// Clean up any lingering virtual audio devices and exit
+    #[arg(long)]
+    clean_virtual_mic: bool,
+
     /// Run in headless daemon mode (no GUI window)
     #[arg(long)]
     headless: bool,
@@ -48,6 +69,14 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Clean up virtual devices if requested
+    if args.clean_virtual_mic {
+        println!("Cleaning up any lingering virtual audio devices...");
+        VirtualMicBridge::cleanup_existing(&args.virtual_sink_name, &args.virtual_mic_name);
+        println!("Cleanup complete.");
+        return Ok(());
+    }
+
     // 1. If user requested device listing
     if args.list_devices {
         list_audio_devices()?;
@@ -55,12 +84,49 @@ fn main() -> Result<()> {
     }
 
     println!("=======================================================");
-    println!("   🎙️ Linux AI Voice Changer: Mic -> Model -> Speaker  ");
+    println!("   HEVoicechanger: Mic -> Model -> Virtual Mic/Speaker ");
     println!("=======================================================");
 
+    // Initialize Virtual Microphone Bridge unless disabled
+    let virtual_mic: Option<Arc<Mutex<VirtualMicBridge>>> = if !args.no_virtual_mic {
+        let config = VirtualMicConfig {
+            speaker_name: args.virtual_sink_name.clone(),
+            speaker_desc: "HEVoicechanger Virtual Output".to_string(),
+            mic_name: args.virtual_mic_name.clone(),
+            mic_desc: "HEVoicechanger Virtual Microphone".to_string(),
+            channels: 2,
+            latency_ms: None,
+        };
+        let mut bridge = VirtualMicBridge::new(config);
+        match bridge.start() {
+            Ok(()) => {
+                println!(
+                    "Virtual Microphone created: \"{}\" (Backend: {})",
+                    args.virtual_mic_name, bridge.active_backend_name
+                );
+                Some(Arc::new(Mutex::new(bridge)))
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to create virtual microphone: {}. Falling back to direct physical output.",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Register clean signal handler for SIGINT/SIGTERM
+    let sig_bridge = virtual_mic.as_ref().map(Arc::clone);
     ctrlc::set_handler(move || {
         println!("\nTermination signal received. Shutting down cleanly...");
+        if let Some(ref b) = sig_bridge {
+            if let Ok(mut bridge) = b.lock() {
+                bridge.stop();
+            }
+        }
         set_shutdown();
     }).expect("Error setting Ctrl-C handler");
 
@@ -223,7 +289,20 @@ fn main() -> Result<()> {
         args.output_device.as_deref(),
     )?;
 
-    println!("Audio pipeline is ACTIVE: speak into your mic to hear changed voice on speaker/headphones.\n");
+    println!("Audio pipeline is ACTIVE.\n");
+
+    // Attach AudioSystem playback stream to VirtualMicBridge (if enabled)
+    if let Some(ref bridge_arc) = virtual_mic {
+        // Allow a brief moment for the CPAL audio stream to register ports with PipeWire / PulseAudio
+        thread::sleep(Duration::from_millis(150));
+        let mut bridge = bridge_arc.lock().unwrap();
+        bridge.attach_hevoicechanger(args.monitor);
+        println!(
+            "Virtual Microphone ROUTED -> Select \"{}\" in Discord/OBS (Headphone monitor: {})",
+            args.virtual_mic_name,
+            if args.monitor { "ENABLED" } else { "DISABLED (use UI or --monitor to hear yourself)" }
+        );
+    }
 
     // 6. Run GUI or Headless Mode
     if args.headless {
@@ -235,8 +314,20 @@ fn main() -> Result<()> {
             let in_rms = controls.input_rms();
             let out_rms = controls.output_rms();
             let mode = if controls.is_enabled() { "ACTIVE" } else { "BYPASS" };
-            print!("\r[{}] In RMS: {:.3} | Out RMS: {:.3} | RTF: {:.2}x | Latency: {:.1}ms   ", 
-                mode, in_rms, out_rms, rtf, lat);
+            let vm_status = if let Some(ref b) = virtual_mic {
+                if let Ok(bridge) = b.lock() {
+                    format!(" | Mic: {} ({} app(s)), Mon: {}", 
+                        bridge.config.mic_name, 
+                        bridge.active_listener_count(), 
+                        if bridge.monitor_enabled { "ON" } else { "OFF" })
+                } else {
+                    String::new()
+                }
+            } else {
+                " | Virtual Mic: OFF".to_string()
+            };
+            print!("\r[{}] In: {:.3} | Out: {:.3} | RTF: {:.2}x | Lat: {:.1}ms{}   ", 
+                mode, in_rms, out_rms, rtf, lat, vm_status);
             use std::io::Write;
             let _ = std::io::stdout().flush();
         }
@@ -245,9 +336,9 @@ fn main() -> Result<()> {
         println!("Launching GUI control window...");
         let native_options = eframe::NativeOptions {
             viewport: eframe::egui::ViewportBuilder::default()
-                .with_inner_size([460.0, 520.0])
-                .with_min_inner_size([400.0, 460.0])
-                .with_title("Linux AI Voice Changer"),
+                .with_inner_size([460.0, 560.0])
+                .with_min_inner_size([400.0, 500.0])
+                .with_title("HEVoicechanger"),
             ..Default::default()
         };
 
@@ -256,9 +347,10 @@ fn main() -> Result<()> {
         let app_model = initial_model.clone();
         let in_name = audio_system.input_device_name.clone();
         let out_name = audio_system.output_device_name.clone();
+        let app_virtual_mic = virtual_mic.as_ref().map(Arc::clone);
 
         eframe::run_native(
-            "Linux AI Voice Changer",
+            "HEVoicechanger",
             native_options,
             Box::new(move |_cc| {
                 Box::new(VoiceChangerApp::new(
@@ -267,6 +359,7 @@ fn main() -> Result<()> {
                     app_model,
                     in_name,
                     out_name,
+                    app_virtual_mic,
                 ))
             }),
         ).map_err(|e| anyhow::anyhow!("GUI execution failed: {}", e))?;
@@ -274,6 +367,11 @@ fn main() -> Result<()> {
 
     set_shutdown();
     let _ = worker_handle.join();
+    if let Some(ref bridge_arc) = virtual_mic {
+        if let Ok(mut bridge) = bridge_arc.lock() {
+            bridge.stop();
+        }
+    }
     println!("Shutdown complete.");
     Ok(())
 }

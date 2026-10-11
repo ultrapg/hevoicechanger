@@ -1,12 +1,14 @@
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use eframe::egui::{self, Color32, ProgressBar, RichText, Slider};
 use crate::audio::AudioControls;
+use crate::virtual_mic::VirtualMicBridge;
 
 pub struct VoiceChangerApp {
     controls: Arc<AudioControls>,
     command_sender: Sender<crate::engine::WorkerCommand>,
+    pub virtual_mic: Option<Arc<Mutex<VirtualMicBridge>>>,
     available_models: Vec<PathBuf>,
     selected_model_idx: usize,
     input_gain: f32,
@@ -31,6 +33,7 @@ impl VoiceChangerApp {
         initial_model: PathBuf,
         input_device_name: String,
         output_device_name: String,
+        virtual_mic: Option<Arc<Mutex<VirtualMicBridge>>>,
     ) -> Self {
         let available_models = Self::scan_models_dir();
         let selected_model_idx = available_models
@@ -47,6 +50,7 @@ impl VoiceChangerApp {
         Self {
             controls,
             command_sender,
+            virtual_mic,
             available_models,
             selected_model_idx,
             input_gain,
@@ -149,7 +153,37 @@ impl eframe::App for VoiceChangerApp {
 
             ui.add_space(8.0);
 
-            // 3. Audio Levels & Sliders
+            // 3. Virtual Microphone (Discord / Apps)
+            if let Some(vm_arc) = &self.virtual_mic {
+                if let Ok(mut vm) = vm_arc.try_lock() {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Virtual Microphone:").strong());
+                            if vm.is_active {
+                                ui.colored_label(Color32::GREEN, format!("ACTIVE ({})", vm.config.mic_name));
+                            } else {
+                                ui.colored_label(Color32::RED, "OFF");
+                            }
+                        });
+
+                        let listeners = vm.active_listener_count();
+                        if listeners > 0 {
+                            ui.label(RichText::new(format!("Connected to {listeners} voice app(s) (Discord/OBS/Zoom)")).size(11.0).color(Color32::LIGHT_GREEN));
+                        } else {
+                            ui.label(RichText::new(format!("In Discord/OBS, select \"{}\" as input microphone", vm.config.mic_name)).size(11.0).weak());
+                        }
+
+                        ui.add_space(2.0);
+                        let mut monitor = vm.monitor_enabled;
+                        if ui.checkbox(&mut monitor, "Hear Myself (Headphone Monitor)").changed() {
+                            vm.set_monitor(monitor);
+                        }
+                    });
+                    ui.add_space(8.0);
+                }
+            }
+
+            // 4. Audio Levels & Sliders
             ui.group(|ui| {
                 ui.label(RichText::new("Audio Levels & Gain").strong());
 
@@ -299,6 +333,17 @@ impl eframe::App for VoiceChangerApp {
                     ui.label("Speaker Device:");
                     ui.label(RichText::new(&self.output_device_name).color(Color32::LIGHT_BLUE));
                 });
+
+                if let Some(vm_arc) = &self.virtual_mic {
+                    if let Ok(vm) = vm_arc.try_lock() {
+                        if vm.is_active {
+                            ui.horizontal(|ui| {
+                                ui.label("Virtual Mic Device:");
+                                ui.label(RichText::new(format!("{} ({})", vm.config.mic_name, vm.active_backend_name)).color(Color32::GREEN));
+                            });
+                        }
+                    }
+                }
             });
         });
     }
